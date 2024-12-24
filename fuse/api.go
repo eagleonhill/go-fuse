@@ -282,6 +282,11 @@ type MountOptions struct {
 	// The filesystem is fully responsible for invalidating data cache.
 	ExplicitDataCacheControl bool
 
+	// If set, ask kernel to enable writeback cache.
+	// The filesystem is responsible for invalidating the cache.
+	// See FUSE_CAP_WRITEBACK_CACHE in fuse_kernel.h.
+	EnableWritebackCache bool
+
 	// SyncRead is off by default, which means that go-fuse enable the
 	// FUSE_CAP_ASYNC_READ capability.
 	// The kernel then submits multiple concurrent reads to service
