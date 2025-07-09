@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"sync"
 	"syscall"
@@ -231,9 +230,101 @@ func TestSymlinkCaching(t *testing.T) {
 	if l, err := os.Readlink(mnt + "/link"); err != nil {
 		t.Fatal(err)
 	} else if l != want[:1] {
-		log.Printf("got %q want %q", l, want[:1])
+		t.Logf("got %q want %q", l, want[:1])
 	}
 	if c := link.count(); c != 2 {
 		t.Errorf("got %d want 2", c)
+	}
+}
+
+type autoInvalNode struct {
+	Inode
+
+	mu      sync.Mutex
+	content []byte
+	mtime   time.Time
+}
+
+var _ = (NodeOpener)((*autoInvalNode)(nil))
+
+func (f *autoInvalNode) Open(ctx context.Context, openFlags uint32) (fh FileHandle, fuseFlags uint32, errno syscall.Errno) {
+	return nil, 0, 0
+}
+
+var _ = (NodeReader)((*autoInvalNode)(nil))
+
+func (f *autoInvalNode) Read(ctx context.Context, fh FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return fuse.ReadResultData(f.content[off : int(off)+len(dest)]), OK
+}
+
+var _ = (NodeGetattrer)((*autoInvalNode)(nil))
+
+func (f *autoInvalNode) Getattr(ctx context.Context, fh FileHandle, out *fuse.AttrOut) syscall.Errno {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out.Size = uint64(len(f.content))
+	out.SetTimes(nil, &f.mtime, nil)
+	return OK
+}
+
+/* Test AUTO_INVAL_DATA */
+func TestAutoInvalData(t *testing.T) {
+	mnt := t.TempDir()
+	node := autoInvalNode{
+		content: bytes.Repeat([]byte{'x'}, 4096),
+		mtime:   time.Now(),
+	}
+	root := &Inode{}
+	dt := 10 * time.Millisecond
+	opts := &Options{
+		EntryTimeout: &dt,
+		AttrTimeout:  &dt,
+		OnAdd: func(ctx context.Context) {
+			root.AddChild("file",
+				root.NewPersistentInode(ctx, &node, StableAttr{Mode: syscall.S_IFREG}), false)
+		},
+	}
+	opts.Debug = testutil.VerboseTest()
+
+	srv, err := Mount(mnt, root, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Unmount()
+	f, err := os.Open(mnt + "/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	data := make([]byte, len(node.content))
+	if _, err := f.Read(data); err != nil {
+		t.Fatal(err)
+	}
+
+	if data[1] != 'x' {
+		t.Errorf("got %c want x", data[1])
+	}
+
+	if _, err := f.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	node.mu.Lock()
+	node.mtime = node.mtime.Add(time.Hour)
+	node.content = bytes.Repeat([]byte{'y'}, 4096)
+	node.mu.Unlock()
+	if _, err := f.Stat(); err != nil {
+		t.Fatal(err)
+	}
+
+	if n, err := f.Read(data); err != nil || len(data) != n {
+		t.Fatalf("Read: %d, %v", n, err)
+	}
+
+	if data[1] != 'y' {
+		t.Errorf("got %c want y", data[1])
 	}
 }

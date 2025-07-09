@@ -225,6 +225,8 @@ func parseRequest(in []byte, kernelSettings *InitIn) (h *operationHandler, inSiz
 		outPayloadSize = int(((*ReadIn)(inData)).Size)
 	case _OP_GETXATTR, _OP_LISTXATTR:
 		outPayloadSize = int(((*GetXAttrIn)(inData)).Size)
+	case _OP_IOCTL:
+		outPayloadSize = int(((*IoctlIn)(inData)).OutSize)
 	}
 
 	outSize = int(h.OutputSize)
@@ -268,6 +270,16 @@ func (r *request) serializeHeader(outPayloadSize int) {
 	if r.inHeader().Opcode == _OP_GETXATTR || r.inHeader().Opcode == _OP_LISTXATTR {
 		if (*GetXAttrIn)(r.inData()).Size != 0 {
 			dataLength = 0
+		}
+	}
+
+	// The InitOut structure has 24 bytes (ie. TimeGran and
+	// further fields not available) in fuse version <= 22.
+	// https://john-millikin.com/the-fuse-protocol#FUSE_INIT
+	if r.inHeader().Opcode == _OP_INIT {
+		out := (*InitOut)(r.outData())
+		if out.Minor <= 22 {
+			dataLength = 24
 		}
 	}
 

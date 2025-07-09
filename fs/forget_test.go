@@ -7,10 +7,10 @@ package fs
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -68,10 +68,10 @@ func TestForget(t *testing.T) {
 	root := &allChildrenNode{
 		depth: 2,
 	}
-	sec := time.Second
+	ttl := 10 * time.Millisecond
 	options := &Options{
 		FirstAutomaticIno: 1,
-		EntryTimeout:      &sec,
+		EntryTimeout:      &ttl,
 	}
 	options.Debug = testutil.VerboseTest()
 	dir := t.TempDir()
@@ -95,11 +95,11 @@ func TestForget(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	log.Println("dropping cache")
+	t.Log("dropping cache")
 	if err := os.WriteFile("/proc/sys/vm/drop_caches", []byte("2"), 0644); err != nil {
 
 	}
-	time.Sleep(time.Second)
+	time.Sleep(ttl)
 
 	bridge := rawFS.(*rawBridge)
 	bridge.mu.Lock()
@@ -114,10 +114,14 @@ type forgetTestRootNode struct {
 	Inode
 
 	mu            sync.Mutex
-	onForgetCount int
+	onForgetCount uint32
 
 	fileNode *forgetTestSubNode
 	dirNode  *forgetTestSubNode
+}
+
+func (n *forgetTestRootNode) OnForget() {
+	atomic.AddUint32(&n.onForgetCount, 1)
 }
 
 type forgetTestSubNode struct {
@@ -126,9 +130,7 @@ type forgetTestSubNode struct {
 }
 
 func (n *forgetTestSubNode) OnForget() {
-	n.root.mu.Lock()
-	defer n.root.mu.Unlock()
-	n.root.onForgetCount++
+	n.root.OnForget()
 }
 
 func (n *forgetTestSubNode) OnAdd(ctx context.Context) {
@@ -164,7 +166,7 @@ func (n *forgetTestRootNode) Lookup(ctx context.Context, name string, out *fuse.
 
 func TestOnForget(t *testing.T) {
 	root := &forgetTestRootNode{}
-	mnt, _ := testMount(t, root, nil)
+	mnt, srv := testMount(t, root, nil)
 
 	sub := mnt + "/subdir"
 	_, err := os.Stat(sub)
@@ -192,16 +194,20 @@ func TestOnForget(t *testing.T) {
 	// The kernel issues FORGET immediately, but it takes a bit to
 	// process the request.
 	time.Sleep(time.Millisecond)
-	root.mu.Lock()
-	if root.onForgetCount != 0 {
-		t.Errorf("got count %d, want 0", root.onForgetCount)
+	if got := atomic.LoadUint32(&root.onForgetCount); got != 0 {
+		t.Errorf("got count %d, want 0", got)
 	}
-	root.mu.Unlock()
 
 	root.fileNode.ForgetPersistent()
-	root.mu.Lock()
-	if root.onForgetCount != 2 {
-		t.Errorf("got count %d, want 2", root.onForgetCount)
+	if got := atomic.LoadUint32(&root.onForgetCount); got != 2 {
+		t.Errorf("got count %d, want 2", got)
 	}
-	root.mu.Unlock()
+
+	if err := srv.Unmount(); err != nil {
+		t.Errorf("Unmount: %v", err)
+	}
+
+	if got := atomic.LoadUint32(&root.onForgetCount); got != 3 {
+		t.Errorf("got count %d, want 3", got)
+	}
 }
