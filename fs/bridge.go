@@ -14,6 +14,7 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/hanwen/go-fuse/v2/internal"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func errnoToStatus(errno syscall.Errno) fuse.Status {
@@ -352,22 +353,44 @@ func (b *rawBridge) inode(id uint64, fh uint64) (*Inode, *fileEntry) {
 	return n, f
 }
 
+var blookup = prometheus.NewSummaryVec(
+	prometheus.SummaryOpts{
+		Name: "velda_bridge_fuse_lookup_steps",
+		Help: "Time spent in each step of the FUSE lookup operation",
+	},
+	[]string{"step"},
+)
+
+func init() {
+	prometheus.MustRegister(blookup)
+}
 func (b *rawBridge) Lookup(cancel <-chan struct{}, header *fuse.InHeader, name string, out *fuse.EntryOut) fuse.Status {
+	t1 := time.Now()
 	parent, _ := b.inode(header.NodeId, 0)
 	ctx := &fuse.Context{Caller: header.Caller, Cancel: cancel}
+	t2 := time.Now()
 	child, errno := b.lookup(ctx, parent, name, out)
+	t3 := time.Now()
 
 	if errno != 0 {
 		if errno == syscall.ENOENT && b.options.NegativeTimeout != nil && out.EntryTimeout() == 0 {
 			out.SetEntryTimeout(*b.options.NegativeTimeout)
 			errno = 0
 		}
+		blookup.WithLabelValues("lookup_fail").Observe(float64(t2.Sub(t1).Seconds()))
+		blookup.WithLabelValues("fstatat_fail").Observe(float64(t3.Sub(t2).Seconds()))
 		return errnoToStatus(errno)
 	}
 
+	t4 := time.Now()
 	child, _ = b.addNewChild(parent, name, child, nil, 0, out)
 	child.setEntryOut(out)
 	b.setEntryOutTimeout(out)
+	t5 := time.Now()
+	blookup.WithLabelValues("lookup").Observe(float64(t2.Sub(t1).Seconds()))
+	blookup.WithLabelValues("fstatat").Observe(float64(t3.Sub(t2).Seconds()))
+	blookup.WithLabelValues("newInode").Observe(float64(t4.Sub(t3).Seconds()))
+	blookup.WithLabelValues("addNewChild").Observe(float64(t5.Sub(t4).Seconds()))
 	return fuse.OK
 }
 

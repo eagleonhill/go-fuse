@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Returns the RawFileSystem so it can be mounted.
@@ -72,8 +73,21 @@ func (c *FileSystemConnector) lookupMountUpdate(out *fuse.Attr, mount *fileSyste
 	return mount.mountInode, fuse.OK
 }
 
+var blookup = prometheus.NewSummaryVec(
+	prometheus.SummaryOpts{
+		Name: "velda_protocol_server_fuse_lookup_steps",
+		Help: "Time spent in each step of the FUSE lookup operation",
+	},
+	[]string{"step"},
+)
+
+func init() {
+	prometheus.MustRegister(blookup)
+}
+
 // internalLookup executes a lookup without affecting NodeId reference counts.
 func (c *FileSystemConnector) internalLookup(cancel <-chan struct{}, out *fuse.Attr, parent *Inode, name string, header *fuse.InHeader) (node *Inode, code fuse.Status) {
+	start := time.Now()
 
 	// We may already know the child because it was created using Create or Mkdir,
 	// from an earlier lookup, or because the nodes were created in advance
@@ -81,13 +95,16 @@ func (c *FileSystemConnector) internalLookup(cancel <-chan struct{}, out *fuse.A
 	child := parent.GetChild(name)
 
 	if child != nil && child.mountPoint != nil {
+		blookup.WithLabelValues("lookupCacheHit").Observe(float64(time.Since(start).Seconds()))
 		return c.lookupMountUpdate(out, child.mountPoint)
 	}
 
 	if child != nil && !parent.mount.options.LookupKnownChildren {
 		code = child.fsInode.GetAttr(out, nil, &fuse.Context{Caller: header.Caller, Cancel: cancel})
+		blookup.WithLabelValues("child").Observe(float64(time.Since(start).Seconds()))
 	} else {
 		child, code = parent.fsInode.Lookup(out, name, &fuse.Context{Caller: header.Caller, Cancel: cancel})
+		blookup.WithLabelValues("lookup-by-parent").Observe(float64(time.Since(start).Seconds()))
 	}
 
 	return child, code

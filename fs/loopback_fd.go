@@ -6,12 +6,15 @@ package fs
 
 import (
 	"context"
+	"log"
 	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/sys/unix"
 )
 
@@ -131,20 +134,41 @@ func (n *LoopbackNodeFd) Statfs(ctx context.Context, out *fuse.StatfsOut) syscal
 
 var _ = (NodeLookuper)((*LoopbackNodeFd)(nil))
 
+var steps = prometheus.NewSummaryVec(
+	prometheus.SummaryOpts{
+		Name: "velda_fuse_lookup_steps",
+		Help: "Time spent in each step of the FUSE lookup operation",
+	},
+	[]string{"step"},
+)
+
+func init() {
+	prometheus.MustRegister(steps)
+}
 func (n *LoopbackNodeFd) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*Inode, syscall.Errno) {
+	t1 := time.Now()
 	fd, err := n.fd()
 	if err != nil {
 		return nil, ToErrno(err)
 	}
 
+	t2 := time.Now()
 	st := syscall.Stat_t{}
 	err = syscall.Fstatat(fd, name, &st, unix.AT_SYMLINK_NOFOLLOW)
+	t3 := time.Now()
 	if err != nil {
+		log.Printf("Lookup %s %s failed: %v", n.Path(nil), name, err)
+		steps.WithLabelValues("lookup_fail").Observe(float64(t2.Sub(t1).Seconds()))
+		steps.WithLabelValues("fstatat_fail").Observe(float64(t3.Sub(t2).Seconds()))
 		return nil, ToErrno(err)
 	}
 
 	out.Attr.FromStat(&st)
 	node := newChildLoopbackFdNode(&n.Inode, name, &st)
+	t4 := time.Now()
+	steps.WithLabelValues("lookup").Observe(float64(t2.Sub(t1).Seconds()))
+	steps.WithLabelValues("fstatat").Observe(float64(t3.Sub(t2).Seconds()))
+	steps.WithLabelValues("newInode").Observe(float64(t4.Sub(t3).Seconds()))
 	return node, 0
 }
 

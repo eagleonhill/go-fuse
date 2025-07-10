@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
@@ -523,10 +525,23 @@ func (ms *Server) handleInit() Status {
 // BenchmarkGoFuseStat-2          	    9310	    121332 ns/op
 // BenchmarkGoFuseReaddir         	    4074	    361568 ns/op
 // BenchmarkGoFuseReaddir-2       	    3511	    319765 ns/op
+
+var cycles = prometheus.NewSummaryVec(
+	prometheus.SummaryOpts{
+		Name: "velda_io_cycles",
+		Help: "Time spent in each step of the FUSE lookup operation",
+	},
+	[]string{"step"},
+)
+
+func init() {
+	prometheus.MustRegister(cycles)
+}
 func (ms *Server) loop() {
 	defer ms.loops.Done()
 exit:
 	for {
+		t1 := time.Now()
 		req, errNo := ms.readRequest()
 		switch errNo {
 		case OK:
@@ -548,6 +563,7 @@ exit:
 			ms.opts.Logger.Printf("Failed to read from fuse conn: %v", errNo)
 			break exit
 		}
+		cycles.WithLabelValues("readRequest").Observe(float64(time.Since(t1).Seconds()))
 
 		if ms.singleReader {
 			go ms.handleRequest(req)
@@ -563,6 +579,7 @@ func (ms *Server) handleRequest(req *requestAlloc) Status {
 		ms.requestProcessingMu.Lock()
 		defer ms.requestProcessingMu.Unlock()
 	}
+	t1 := time.Now()
 
 	h, inSize, outSize, outPayloadSize, code := parseRequest(req.inputBuf, &ms.kernelSettings)
 	if !code.Ok() {
@@ -578,11 +595,16 @@ func (ms *Server) handleRequest(req *requestAlloc) Status {
 		req.outPayload = ms.buffers.AllocBuffer(uint32(outPayloadSize))
 		req.bufferPoolOutputBuf = req.outPayload
 	}
+	t2 := time.Now()
 	ms.protocolServer.handleRequest(h, &req.request)
+	t3 := time.Now()
+	cycles.WithLabelValues("prepareRequest").Observe(float64(t2.Sub(t1).Seconds()))
+	cycles.WithLabelValues("handleRequest").Observe(float64(t3.Sub(t2).Seconds()))
 	if req.suppressReply {
 		return OK
 	}
 	errno := ms.write(&req.request)
+	cycles.WithLabelValues("writeRequest").Observe(float64(time.Since(t3).Seconds()))
 	if errno != 0 {
 		// Ignore ENOENT for INTERRUPT responses which
 		// indicates that the referred request is no longer

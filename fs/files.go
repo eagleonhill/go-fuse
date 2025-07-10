@@ -77,6 +77,7 @@ func (f *loopbackFile) Release(ctx context.Context) syscall.Errno {
 }
 
 func (f *loopbackFile) Flush(ctx context.Context) syscall.Errno {
+	return OK
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	// Since Flush() may be called for each dup'd fd, we don't
